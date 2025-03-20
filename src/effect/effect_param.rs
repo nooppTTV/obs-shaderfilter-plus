@@ -473,6 +473,10 @@ pub struct EffectParamCustomFFT {
     pub property_channel: LoadedValueTypeProperty<LoadedValueTypePropertyDescriptorI32>,
     pub property_dampening_factor_attack: LoadedValueTypeProperty<LoadedValueTypePropertyDescriptorF64>,
     pub property_dampening_factor_release: LoadedValueTypeProperty<LoadedValueTypePropertyDescriptorF64>,
+    pub property_mel_enabled: LoadedValueTypeProperty<LoadedValueTypePropertyDescriptorBool>,
+    pub property_n_mels: LoadedValueTypeProperty<LoadedValueTypePropertyDescriptorI32>,
+    pub property_f_min: LoadedValueTypeProperty<LoadedValueTypePropertyDescriptorF64>,
+    pub property_f_max: LoadedValueTypeProperty<LoadedValueTypePropertyDescriptorF64>,
 }
 
 // Does not implement EffectParamCustom because of different argument requirements
@@ -548,14 +552,76 @@ impl EffectParamCustomFFT {
             preprocess_result,
             settings,
         )?;
+        let property_mel_enabled = <LoadedValueTypeProperty<_> as LoadedValueType>::from(
+            LoadedValueTypePropertyArgs {
+                allow_definitions_in_source: true,
+                default_value: false,
+                default_descriptor_specialization: PropertyDescriptorSpecializationBool {},
+            },
+            identifier,
+            Some("mel_enabled"),
+            preprocess_result,
+            settings,
+        )?;
+        let property_n_mels = <LoadedValueTypeProperty<_> as LoadedValueType>::from(
+            LoadedValueTypePropertyArgs {
+                allow_definitions_in_source: true,
+                default_value: 128,
+                default_descriptor_specialization: PropertyDescriptorSpecializationI32 {
+                    min: 1,
+                    max: 1024,
+                    step: 1,
+                    slider: false,
+                },
+            },
+            identifier,
+            Some("n_mels"),
+            preprocess_result,
+            settings,
+        )?;
+        let property_f_min = <LoadedValueTypeProperty<_> as LoadedValueType>::from(
+            LoadedValueTypePropertyArgs {
+                allow_definitions_in_source: true,
+                default_value: 0.0,
+                default_descriptor_specialization: PropertyDescriptorSpecializationF64 {
+                    min: 0.0,
+                    max: 10000.0,
+                    step: 1.0,
+                    slider: false,
+                },
+            },
+            identifier,
+            Some("f_min"),
+            preprocess_result,
+            settings,
+        )?;
+        let property_f_max = <LoadedValueTypeProperty<_> as LoadedValueType>::from(
+            LoadedValueTypePropertyArgs {
+                allow_definitions_in_source: true,
+                default_value: 10000.0,
+                default_descriptor_specialization: PropertyDescriptorSpecializationF64 {
+                    min: 0.0,
+                    max: 20000.0,
+                    step: 1.0,
+                    slider: false,
+                },
+            },
+            identifier,
+            Some("f_max"),
+            preprocess_result,
+            settings,
+        )?;
 
-        let audio_fft_descriptor = GlobalStateAudioFFTDescriptor::new(
+        let audio_fft_descriptor = GlobalStateAudioFFTDescriptor::new_with_mel(
             property_mix.get_value() as usize - 1,
             property_channel.get_value() as usize - 1,
             property_dampening_factor_attack.get_value() / 100.0,
             property_dampening_factor_release.get_value() / 100.0,
-            // TODO: Make customizable, but provide a sane default value
             WindowFunction::Hanning,
+            property_mel_enabled.get_value(),
+            property_n_mels.get_value() as usize,
+            property_f_min.get_value() as f32,
+            property_f_max.get_value() as f32,
         );
 
         let mut result = Self {
@@ -566,6 +632,10 @@ impl EffectParamCustomFFT {
             property_channel,
             property_dampening_factor_attack,
             property_dampening_factor_release,
+            property_mel_enabled,
+            property_n_mels,
+            property_f_min,
+            property_f_max,
         };
 
         result.request_audio_fft();
@@ -574,13 +644,16 @@ impl EffectParamCustomFFT {
     }
 
     fn request_audio_fft(&mut self) {
-        let audio_fft_descriptor = GlobalStateAudioFFTDescriptor::new(
+        let audio_fft_descriptor = GlobalStateAudioFFTDescriptor::new_with_mel(
             self.property_mix.get_value() as usize - 1,
             self.property_channel.get_value() as usize - 1,
             self.property_dampening_factor_attack.get_value() / 100.0,
             self.property_dampening_factor_release.get_value() / 100.0,
-            // TODO: Make customizable, but provide a sane default value
             WindowFunction::Hanning,
+            self.property_mel_enabled.get_value(),
+            self.property_n_mels.get_value() as usize,
+            self.property_f_min.get_value() as f32,
+            self.property_f_max.get_value() as f32,
         );
 
         self.audio_fft = Some(GLOBAL_STATE.request_audio_fft(&audio_fft_descriptor));
@@ -593,6 +666,10 @@ impl BindableProperty for EffectParamCustomFFT {
         self.property_channel.add_properties(properties);
         self.property_dampening_factor_attack.add_properties(properties);
         self.property_dampening_factor_release.add_properties(properties);
+        self.property_mel_enabled.add_properties(properties);
+        self.property_n_mels.add_properties(properties);
+        self.property_f_min.add_properties(properties);
+        self.property_f_max.add_properties(properties);
     }
 
     fn reload_settings(&mut self, settings: &mut SettingsContext) {
@@ -600,6 +677,10 @@ impl BindableProperty for EffectParamCustomFFT {
         self.property_channel.reload_settings(settings);
         self.property_dampening_factor_attack.reload_settings(settings);
         self.property_dampening_factor_release.reload_settings(settings);
+        self.property_mel_enabled.reload_settings(settings);
+        self.property_n_mels.reload_settings(settings);
+        self.property_f_min.reload_settings(settings);
+        self.property_f_max.reload_settings(settings);
         self.request_audio_fft();
     }
 
@@ -609,21 +690,45 @@ impl BindableProperty for EffectParamCustomFFT {
         } else {
             return;
         };
-        let frequency_spectrum = &fft_result.frequency_spectrum;
-        let texture_data = unsafe {
-            std::slice::from_raw_parts::<u8>(
-                frequency_spectrum.as_ptr() as *const _,
-                frequency_spectrum.len() * std::mem::size_of::<f32>(),
-            )
-        }.iter().copied().collect::<Vec<_>>();
-        let texture_fft = TextureDescriptor {
-            dimensions: [frequency_spectrum.len(), 1],
-            color_format: ColorFormatKind::R32F,
-            levels: smallvec![texture_data],
-            flags: 0,
-        };
-
-        self.effect_param.prepare_value(texture_fft);
+        
+        // Check if Mel is enabled in the FFT result
+        if self.property_mel_enabled.get_value() && fft_result.mel_spectrum.is_some() {
+            // Generate texture from Mel data
+            let mel_spectrum = fft_result.mel_spectrum.as_ref().unwrap();
+            let texture_data = unsafe {
+                std::slice::from_raw_parts::<u8>(
+                    mel_spectrum.as_ptr() as *const _,
+                    mel_spectrum.len() * std::mem::size_of::<f32>(),
+                )
+            }.iter().copied().collect::<Vec<_>>();
+            
+            let texture_mel = TextureDescriptor {
+                dimensions: [mel_spectrum.len(), 1],
+                color_format: ColorFormatKind::R32F,
+                levels: smallvec![texture_data],
+                flags: 0,
+            };
+            
+            self.effect_param.prepare_value(texture_mel);
+        } else {
+            // Use standard FFT data
+            let frequency_spectrum = &fft_result.frequency_spectrum;
+            let texture_data = unsafe {
+                std::slice::from_raw_parts::<u8>(
+                    frequency_spectrum.as_ptr() as *const _,
+                    frequency_spectrum.len() * std::mem::size_of::<f32>(),
+                )
+            }.iter().copied().collect::<Vec<_>>();
+            
+            let texture_fft = TextureDescriptor {
+                dimensions: [frequency_spectrum.len(), 1],
+                color_format: ColorFormatKind::R32F,
+                levels: smallvec![texture_data],
+                flags: 0,
+            };
+            
+            self.effect_param.prepare_value(texture_fft);
+        }
     }
 
     fn stage_value<'a>(&mut self, graphics_context: &'a GraphicsContext) {

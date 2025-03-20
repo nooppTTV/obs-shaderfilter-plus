@@ -28,6 +28,7 @@ use num_complex::Complex;
 use util::*;
 use effect::*;
 use preprocessor::*;
+mod mel;
 
 macro_rules! throw {
     ($e:expr) => {{
@@ -93,6 +94,10 @@ pub struct GlobalStateAudioFFTDescriptor {
     dampening_factor_attack: OrderedFloat<f64>,
     dampening_factor_release: OrderedFloat<f64>,
     window_function: WindowFunction,
+    mel_enabled: bool,
+    n_mels: usize,
+    f_min: OrderedFloat<f32>,
+    f_max: OrderedFloat<f32>,
 }
 
 impl GlobalStateAudioFFTDescriptor {
@@ -109,6 +114,34 @@ impl GlobalStateAudioFFTDescriptor {
             dampening_factor_attack: OrderedFloat(dampening_factor_attack),
             dampening_factor_release: OrderedFloat(dampening_factor_release),
             window_function,
+            mel_enabled: false,
+            n_mels: 128,
+            f_min: OrderedFloat(20.0),
+            f_max: OrderedFloat(8000.0),
+        }
+    }
+    
+    pub fn new_with_mel(
+        mix: usize,
+        channel: usize,
+        dampening_factor_attack: f64,
+        dampening_factor_release: f64,
+        window_function: WindowFunction,
+        mel_enabled: bool,
+        n_mels: usize,
+        f_min: f32,
+        f_max: f32,
+    ) -> Self {
+        Self {
+            mix,
+            channel,
+            dampening_factor_attack: OrderedFloat(dampening_factor_attack),
+            dampening_factor_release: OrderedFloat(dampening_factor_release),
+            window_function,
+            mel_enabled,
+            n_mels,
+            f_min: OrderedFloat(f_min),
+            f_max: OrderedFloat(f_max),
         }
     }
 }
@@ -117,6 +150,7 @@ impl GlobalStateAudioFFTDescriptor {
 pub struct FFTResult {
     batch_number: usize,
     frequency_spectrum: Arc<Vec<f32>>,
+    mel_spectrum: Option<Arc<Vec<f32>>>,
 }
 
 pub struct GlobalStateAudioFFTMutable {
@@ -257,9 +291,43 @@ impl GlobalStateAudioFFT {
 
             let next_batch_number = mutable_write.result.as_ref()
                 .map(|result| result.batch_number + 1).unwrap_or(0);
+                
+            // Compute Mel spectrogram if enabled
+            let mel_spectrum = if this.descriptor.mel_enabled {
+                use mel::MelFilterBank;
+                
+                let sample_rate = ObsAudioInfo::get().unwrap().samples_per_second() as f32;
+                let n_mels = this.descriptor.n_mels;
+                let f_min = *this.descriptor.f_min;
+                let f_max = *this.descriptor.f_max;
+                
+                // Create the Mel filter bank
+                let filter_bank = MelFilterBank::new(
+                    analysis_result.len() * 2 - 2, // Convert back to FFT size
+                    sample_rate,
+                    n_mels,
+                    f_min,
+                    f_max
+                );
+                
+                // Apply the filter bank to the FFT magnitudes
+                let mel_values = filter_bank.apply(&analysis_result);
+                
+                // Apply log compression with small offset to avoid log(0)
+                let mel_db = MelFilterBank::apply_log_compression(&mel_values, 1e-10);
+                
+                // Apply normalization to get values in the range [0, 1]
+                let normalized_mel = MelFilterBank::normalize(&mel_db);
+                
+                Some(Arc::new(normalized_mel))
+            } else {
+                None
+            };
+            
             mutable_write.result = Some(FFTResult {
                 batch_number: next_batch_number,
                 frequency_spectrum: Arc::new(analysis_result),
+                mel_spectrum,
             });
             mutable_write.next_batch_scheduled.swap(false, Ordering::SeqCst);
         }
@@ -430,7 +498,7 @@ impl Data {
             source,
             effect: None,
             effect_fallback_blit: {
-                const EFFECT_SOURCE_FALLBACK: &'static str = include_str!("effect_fallback.effect");
+                const EFFECT_SOURCE_FALLBACK: &'static str = include_str!("../examples/effect_fallback.hlsl");
 
                 let graphics_context = GraphicsContext::enter()
                     .expect("Could not enter the graphics context to initialize the fallback effect.");
@@ -863,3 +931,42 @@ impl Module for ShaderFilterPlus {
 }
 
 obs_register_module!(ShaderFilterPlus);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mel::{MelFilterBank, MelParameters};
+
+    #[test]
+    fn test_mel_filter_bank_integration() {
+        // Test creating a Mel filter bank
+        let fft_size = 1024;
+        let sample_rate = 44100.0;
+        let n_mels = 40;
+        let f_min = 20.0;
+        let f_max = 20000.0;
+        
+        let filter_bank = MelFilterBank::new(fft_size, sample_rate, n_mels, f_min, f_max);
+        
+        // Create dummy FFT data
+        let mut fft_data = vec![0.0; fft_size / 2 + 1];
+        // Add some energy at different frequencies
+        fft_data[10] = 1.0;
+        fft_data[50] = 0.5;
+        fft_data[100] = 0.25;
+        
+        // Apply filter bank
+        let mel_output = filter_bank.apply(&fft_data);
+        
+        // Verify we got the expected number of Mel bands
+        assert_eq!(mel_output.len(), n_mels);
+        
+        // Verify the Mel output contains some energy
+        let total_energy: f32 = mel_output.iter().sum();
+        assert!(total_energy > 0.0);
+        
+        // Test log compression
+        let log_mel = MelFilterBank::apply_log_compression(&mel_output, 1e-10);
+        assert_eq!(log_mel.len(), n_mels);
+    }
+}

@@ -286,7 +286,7 @@ impl PreparedEffect {
     }
 
     pub fn create_effect<'a>(shader_path: &PathBuf, shader_source: &str, graphics_context: &'a GraphicsContext) -> Result<(GraphicsContextDependentEnabled<'a, GraphicsEffect>, PreprocessResult), Cow<'static, str>> {
-        const EFFECT_SOURCE_TEMPLATE: &'static str = include_str!("../effect_template.effect");
+        const EFFECT_SOURCE_TEMPLATE: &'static str = include_str!("../../examples/effect_template.hlsl");
 
         let (preprocess_result, effect_source) = {
             let pattern = Regex::new(r"(?P<shader>__SHADER__)").unwrap();
